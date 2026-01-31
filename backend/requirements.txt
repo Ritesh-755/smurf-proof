@@ -1,6 +1,0 @@
-networkx
-pandas
-numpy
-django
-djangorestframework
-python-dateutil

@@ -1,5 +1,6 @@
 asgiref==3.11.0
 Django==6.0.1
+django-cors-headers==4.9.0
 djangorestframework==3.16.1
 filelock==3.20.0
 fsspec==2025.12.0
@@ -16,9 +17,3 @@ sqlparse==0.5.5
 sympy==1.14.0
 torch==2.10.0+cpu
 typing_extensions==4.15.0
-networkx
-pandas
-numpy
-django
-djangorestframework
-python-dateutil

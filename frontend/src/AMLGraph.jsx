@@ -1,139 +1,227 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import * as d3 from "d3";
 
-export default function AMLTransactionGraph() {
+const BASE_URL = "http://127.0.0.1:8000/api";
+
+export default function AMLGraph() {
   const svgRef = useRef(null);
-  const [mode, setMode] = useState("rule");
 
   useEffect(() => {
-    const svg = d3.select(svgRef.current);
-    svg.selectAll("*").remove();
+    Promise.all([
+      fetch(`${BASE_URL}/graph/`).then(r => r.json()),
+      fetch(`${BASE_URL}/final-risk/`).then(r => r.json())
+    ])
+      .then(([graph, finalRisk]) => {
+        renderGraph(graph, finalRisk);
+      })
+      .catch(err => console.error("❌ API error:", err));
+  }, []);
+
+  const renderGraph = (graph, finalRisk) => {
+    if (!svgRef.current) return;
 
     const width = window.innerWidth;
-    const height = svgRef.current.clientHeight;
+    const height = window.innerHeight;
 
-    // ===== ARROW =====
-    svg.append("defs")
-      .append("marker")
+    const riskMap = {};
+    finalRisk.wallets.forEach(w => {
+      riskMap[w.id] = w;
+    });
+
+    const svg = d3
+      .select(svgRef.current)
+      .attr("width", width)
+      .attr("height", height)
+      .style("background", "#020617");
+
+    svg.selectAll("*").remove();
+
+    const container = svg.append("g");
+
+    svg.call(
+      d3.zoom()
+        .scaleExtent([0.3, 4])
+        .on("zoom", e => container.attr("transform", e.transform))
+    );
+
+    /* ============================
+       DEFINITIONS (Glow + Arrow)
+    ============================ */
+    const defs = svg.append("defs");
+
+    defs.append("marker")
       .attr("id", "arrow")
       .attr("viewBox", "0 -5 10 10")
-      .attr("refX", 26)
+      .attr("refX", 22)
       .attr("refY", 0)
-      .attr("markerWidth", 6)
-      .attr("markerHeight", 6)
+      .attr("markerWidth", 5)
+      .attr("markerHeight", 5)
       .attr("orient", "auto")
       .append("path")
       .attr("d", "M0,-5L10,0L0,5")
-      .attr("fill", "#ffd166");
+      .attr("fill", "#ef4444");
 
-    // ===== DATA =====
-    const nodes = [
-      { id: "wallet1" }, { id: "wallet2" }, { id: "wallet3" },
-      { id: "wallet4" }, { id: "wallet5" }, { id: "wallet6" },
-      { id: "wallet7" }, { id: "wallet8" },
-      { id: "wallet9" }, { id: "wallet10" },
-      { id: "wallet11" }, { id: "wallet12" },
-      { id: "wallet13" }, { id: "wallet14" }
-    ];
+    defs.append("filter")
+      .attr("id", "glow")
+      .append("feGaussianBlur")
+      .attr("stdDeviation", "4")
+      .attr("result", "coloredBlur");
 
-    const links = [
-      { source: "wallet1", target: "wallet2" },
-      { source: "wallet1", target: "wallet3" },
-      { source: "wallet1", target: "wallet4" },
-      { source: "wallet1", target: "wallet9" },
-      { source: "wallet2", target: "wallet5" },
-      { source: "wallet3", target: "wallet6" },
-      { source: "wallet4", target: "wallet7" },
-      { source: "wallet9", target: "wallet10" },
-      { source: "wallet5", target: "wallet8" },
-      { source: "wallet6", target: "wallet8" },
-      { source: "wallet7", target: "wallet8" },
-      { source: "wallet10", target: "wallet8" },
-      { source: "wallet8", target: "wallet11" },
-      { source: "wallet11", target: "wallet12" },
-      { source: "wallet11", target: "wallet13" },
-      { source: "wallet12", target: "wallet14" },
-      { source: "wallet13", target: "wallet14" }
-    ];
+    defs.append("filter")
+      .attr("id", "smurfing-glow")
+      .append("feGaussianBlur")
+      .attr("stdDeviation", "3")
+      .attr("result", "coloredBlur");
 
-    // ===== FAN COUNTS =====
-    const fanOut = {}, fanIn = {};
-    nodes.forEach(n => fanOut[n.id] = fanIn[n.id] = 0);
-    links.forEach(l => { fanOut[l.source]++; fanIn[l.target]++; });
+    defs.select("#smurfing-glow")
+      .append("feFlood")
+      .attr("flood-color", "#ef4444")
+      .attr("result", "coloredBlur");
 
-    // ===== RISKS =====
-    const ruleRisk = {}, gnnRiskBase = {};
-    nodes.forEach((n, i) => {
-      ruleRisk[n.id] = Math.max(0.15, 0.95 - i * 0.05);
-      gnnRiskBase[n.id] = Math.max(0.2, 0.97 - i * 0.05);
+    defs.select("#smurfing-glow")
+      .append("feComposite")
+      .attr("in", "coloredBlur")
+      .attr("in2", "SourceGraphic")
+      .attr("operator", "in")
+      .attr("result", "colored");
+
+    defs.select("#smurfing-glow")
+      .append("feMerge")
+      .append("feMergeNode")
+      .attr("in", "colored");
+
+    defs.select("#smurfing-glow")
+      .select("feMerge")
+      .append("feMergeNode")
+      .attr("in", "SourceGraphic");
+
+    /* ============================
+       DEGREE → NODE SIZE
+    ============================ */
+    const degree = {};
+    graph.edges.forEach(e => {
+      degree[e.source] = (degree[e.source] || 0) + 1;
+      degree[e.target] = (degree[e.target] || 0) + 1;
     });
 
-    let gnnRisk = { ...gnnRiskBase };
+    const radius = d3.scaleLinear()
+      .domain(d3.extent(Object.values(degree)))
+      .range([8, 26]);
 
-    // ===== SIM =====
-    const sim = d3.forceSimulation(nodes)
-      .force("link", d3.forceLink(links).id(d => d.id).distance(85))
-      .force("charge", d3.forceManyBody().strength(-300))
+    /* ============================
+       FORCE SIMULATION
+    ============================ */
+    const sim = d3.forceSimulation(graph.nodes)
+      .force("link", d3.forceLink(graph.edges).id(d => d.id).distance(140))
+      .force("charge", d3.forceManyBody().strength(-420))
       .force("center", d3.forceCenter(width / 2, height / 2));
 
-    // ===== DRAG =====
-    const drag = d3.drag()
-      .on("start", (e, d) => {
-        if (!e.active) sim.alphaTarget(0.3).restart();
-        d.fx = d.x; d.fy = d.y;
-      })
-      .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
-      .on("end", (e, d) => {
-        if (!e.active) sim.alphaTarget(0);
-        d.fx = null; d.fy = null;
-      });
+    /* ============================
+       TOOLTIP
+    ============================ */
+    const tooltip = d3.select("body")
+      .append("div")
+      .style("position", "absolute")
+      .style("background", "#020617")
+      .style("border", "1px solid #334155")
+      .style("padding", "8px 10px")
+      .style("border-radius", "8px")
+      .style("font-size", "12px")
+      .style("color", "#e5e7eb")
+      .style("pointer-events", "none")
+      .style("opacity", 0);
 
-    // ===== LINKS =====
-    const link = svg.append("g")
+    /* ============================
+       LINKS (Animated)
+    ============================ */
+    const link = container.append("g")
       .selectAll("line")
-      .data(links)
+      .data(graph.edges)
       .enter()
       .append("line")
-      .attr("stroke", "#94a3b8")
-      .attr("stroke-width", 1.4)
-      .attr("stroke-dasharray", "6 6")
-      .attr("marker-end", "url(#arrow)");
+      .attr("stroke", d =>
+        d.pattern === "smurfing" ? "#ef4444" :
+        d.pattern === "peeling" ? "#a855f7" :
+        "#64748b"
+      )
+      .attr("stroke-width", d =>
+        d.pattern === "smurfing" ? 4 :
+        d.pattern === "peeling" ? 3 : 1.2
+      )
+      .attr("stroke-dasharray", d =>
+        d.pattern === "peeling" ? "6 6" : "4 6"
+      )
+      .attr("marker-end", d =>
+        d.pattern ? "url(#arrow)" : null
+      )
+      .attr("filter", d =>
+        d.pattern === "smurfing" ? "url(#smurfing-glow)" : null
+      );
 
-    // ===== NODES =====
-    const node = svg.append("g")
-      .selectAll("g")
-      .data(nodes)
-      .enter()
-      .append("g")
-      .call(drag);
-
-    node.append("circle")
-      .attr("r", 9)
-      .attr("stroke", "white")
-      .attr("stroke-width", 1.3)
-      .attr("fill", "#facc15");
-
-    node.append("text")
-      .attr("dx", 14)
-      .attr("dy", 4)
-      .attr("fill", "white")
-      .attr("font-size", 11)
-      .text(d => d.id);
-
-    const riskText = node.append("text")
-      .attr("dx", 14)
-      .attr("dy", 16)
-      .attr("fill", "#facc15")
-      .attr("font-size", 10);
-
-    // ===== DASH ANIMATION =====
+    /* Animated flow */
     let dash = 0;
     d3.timer(() => {
-      dash -= 0.6;
+      dash -= 0.8;
       link.attr("stroke-dashoffset", dash);
     });
 
-    // ===== TICK =====
+    /* ============================
+       NODES
+    ============================ */
+    const node = container.append("g")
+      .selectAll("circle")
+      .data(graph.nodes)
+      .enter()
+      .append("circle")
+      .attr("r", d => radius(degree[d.id] || 1))
+      .attr("fill", d => {
+        const info = riskMap[d.id];
+        const r = info?.final_risk ?? 0;
+        if (r >= 0.85) return "#dc2626";
+        if (r >= 0.6) return "#f97316";
+        if (r >= 0.3) return "#22c55e";
+        return "#2563eb";
+      })
+      .attr("filter", d =>
+        d.is_involved && riskMap[d.id]?.final_risk >= 0.85
+          ? "url(#glow)"
+          : null
+      )
+      .on("mouseover", (e, d) => {
+        const info = riskMap[d.id];
+        tooltip
+          .style("opacity", 1)
+          .html(`
+            <strong>${d.id}</strong><br/>
+            Risk: ${(info?.final_risk * 100).toFixed(1)}%<br/>
+            ${info?.reasons?.map(r => `• ${r}`).join("<br/>") || ""}
+          `);
+      })
+      .on("mousemove", e => {
+        tooltip
+          .style("left", e.pageX + 12 + "px")
+          .style("top", e.pageY + 12 + "px");
+      })
+      .on("mouseout", () => {
+        tooltip.style("opacity", 0);
+      })
+      .call(
+        d3.drag()
+          .on("start", e => {
+            if (!e.active) sim.alphaTarget(0.3).restart();
+          })
+          .on("drag", (e, d) => {
+            d.fx = e.x;
+            d.fy = e.y;
+          })
+          .on("end", e => {
+            if (!e.active) sim.alphaTarget(0);
+          })
+      );
+
+    /* ============================
+       SIM TICK
+    ============================ */
     sim.on("tick", () => {
       link
         .attr("x1", d => d.source.x)
@@ -141,76 +229,45 @@ export default function AMLTransactionGraph() {
         .attr("x2", d => d.target.x)
         .attr("y2", d => d.target.y);
 
-      node.attr("transform", d => `translate(${d.x},${d.y})`);
+      node
+        .attr("cx", d => d.x)
+        .attr("cy", d => d.y);
     });
 
-    // ===== UPDATE =====
-    function update() {
-      const risk = mode === "rule" ? ruleRisk : gnnRisk;
+    /* ============================
+       LEGEND
+    ============================ */
+    const legend = svg.append("g")
+      .attr("transform", "translate(20,20)");
 
-      node.select("circle")
-        .attr("fill", d =>
-          fanOut[d.id] >= 2 && risk[d.id] > 0.6 ? "#ef4444" :
-          fanIn[d.id] >= 2 && risk[d.id] > 0.6 ? "#38bdf8" :
-          "#facc15"
-        );
+    const legendData = [
+      { label: "High Risk Wallet", color: "#dc2626" },
+      { label: "Medium Risk Wallet", color: "#f97316" },
+      { label: "Low Risk Wallet", color: "#22c55e" },
+      { label: "Normal Wallet", color: "#2563eb" },
+      { label: "Smurfing Path", color: "#ef4444" },
+      { label: "Peeling Chain", color: "#a855f7" }
+    ];
 
-      link
-        .attr("stroke", d =>
-          fanOut[d.source.id] >= 2 && risk[d.source.id] > 0.6 ? "#ef4444" :
-          fanIn[d.target.id] >= 2 && risk[d.target.id] > 0.6 ? "#38bdf8" :
-          "#94a3b8"
-        )
-        .attr("stroke-width", d =>
-          (fanOut[d.source.id] >= 2 && risk[d.source.id] > 0.6) ||
-          (fanIn[d.target.id] >= 2 && risk[d.target.id] > 0.6)
-            ? 3
-            : 1.4
-        );
+    legend.selectAll("g")
+      .data(legendData)
+      .enter()
+      .append("g")
+      .attr("transform", (_, i) => `translate(0, ${i * 22})`)
+      .each(function (d) {
+        const g = d3.select(this);
+        g.append("rect")
+          .attr("width", 14)
+          .attr("height", 14)
+          .attr("fill", d.color);
+        g.append("text")
+          .attr("x", 20)
+          .attr("y", 12)
+          .attr("font-size", "12px")
+          .attr("fill", "#e5e7eb")
+          .text(d.label);
+      });
+  };
 
-      riskText.text(d => `Risk ${(risk[d.id] * 100).toFixed(0)}%`);
-    }
-
-    // ===== GNN PROP =====
-    const interval = setInterval(() => {
-      if (mode === "gnn") {
-        links.forEach(l => {
-          gnnRisk[l.target.id] = Math.max(
-            gnnRisk[l.target.id],
-            gnnRisk[l.source.id] * 0.85
-          );
-        });
-        update();
-      }
-    }, 1200);
-
-    update();
-    sim.alpha(1).restart();
-
-    return () => clearInterval(interval);
-  }, [mode]);
-
-  return (
-    <div className="bg-slate-950 text-white min-h-screen">
-      <header className="flex items-center gap-5 px-6 py-4 bg-slate-900">
-        <h1 className="text-lg font-semibold">AML Smurfing Detection</h1>
-        <select
-          className="bg-slate-800 border border-slate-600 rounded px-3 py-1"
-          value={mode}
-          onChange={e => setMode(e.target.value)}
-        >
-          <option value="rule">Rule-Based AML</option>
-          <option value="gnn">GNN-Based AML</option>
-        </select>
-      </header>
-
-      <div className="px-6 py-2 text-sm opacity-90 bg-slate-950">
-        {mode === "rule"
-          ? "Rule-based AML: flags fan-in / fan-out only when risk exceeds threshold."
-          : "GNN AML: risk propagates through transaction paths revealing hidden smurfing."}
-      </div>
-
-      <svg ref={svgRef} className="w-screen h-[70vh]" />
-    </div>
-  );
+  return <svg ref={svgRef} className="fixed inset-0 w-full h-full" />;
 }

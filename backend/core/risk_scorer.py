@@ -1,43 +1,66 @@
-import numpy as np
 import networkx as nx
 
+# -------------------------------------------------
+# AML Risk Component Thresholds
+# -------------------------------------------------
+FAN_OUT_THRESHOLD = 3
+FAN_IN_THRESHOLD = 3
+MIN_TX_TEMPORAL = 3
+LOW_IMBALANCE_THRESHOLD = 0.2
+
 
 # -------------------------------------------------
-# Individual Risk Components
+# Individual Risk Components (FIXED)
 # -------------------------------------------------
 def compute_structural_risk(node_feats, patterns):
-    risk = max(node_feats["in_degree"], node_feats["out_degree"])
-
-    if patterns.get("fan_in"):
-        risk = max(risk, 0.8)
-
-    if patterns.get("fan_out"):
-        risk = max(risk, 0.8)
-
-    return min(risk, 1.0)
+    """
+    Structural risk exists ONLY if fan-in or fan-out
+    exceeds laundering thresholds.
+    """
+    if node_feats["out_degree"] >= FAN_OUT_THRESHOLD:
+        return 1.0
+    if node_feats["in_degree"] >= FAN_IN_THRESHOLD:
+        return 1.0
+    return 0.0
 
 
 def compute_flow_risk(node_feats, patterns):
-    # low imbalance = high pass-through risk
-    risk = 1.0 - node_feats["flow_imbalance"]
+    """
+    Flow risk exists ONLY for pass-through behavior:
+    multiple incoming + outgoing with low imbalance.
+    """
+    incoming = node_feats.get("in_degree", 0)
+    outgoing = node_feats.get("out_degree", 0)
+    imbalance = node_feats.get("flow_imbalance", 1.0)
 
-    if patterns.get("mule_wallet"):
-        risk = max(risk, 0.9)
+    if incoming >= 2 and outgoing >= 1 and imbalance <= LOW_IMBALANCE_THRESHOLD:
+        return 1.0
 
-    return min(risk, 1.0)
+    return 0.0
 
 
 def compute_temporal_risk(node_feats, patterns):
-    # short activity span = high risk
-    risk = 1.0 - node_feats["active_time_span"]
+    """
+    Temporal risk exists ONLY when multiple transactions
+    occur in a short time window.
+    """
+    tx_count = node_feats.get("tx_count", 0)
+    time_span = node_feats.get("active_time_span", 1.0)
 
-    if patterns.get("peeling_chain") or patterns.get("multi_hop_convergence"):
-        risk = max(risk, 0.8)
+    if tx_count < MIN_TX_TEMPORAL:
+        return 0.0
 
-    return min(risk, 1.0)
+    # time_span is assumed normalized [0,1]
+    if time_span <= 0.3:
+        return 1.0
+
+    return 0.0
 
 
 def compute_proximity_risk(G, suspicious_wallets, wallet, max_hops=3):
+    """
+    Proximity risk propagates suspicion through the graph.
+    """
     for s in suspicious_wallets:
         if wallet == s:
             return 1.0
@@ -52,20 +75,19 @@ def compute_proximity_risk(G, suspicious_wallets, wallet, max_hops=3):
 
 
 # -------------------------------------------------
-# Base Risk Aggregation
+# Base Risk Aggregation (GATED)
 # -------------------------------------------------
 def compute_base_risk(
     G,
     node_features,
     pattern_results,
-    weights=(0.35, 0.30, 0.20, 0.15),
+    weights=(0.4, 0.3, 0.2, 0.1),
 ):
     """
-    Compute base laundering risk for each wallet.
+    AML-grade base risk computation.
 
-    Safeguards:
-    - Skip non-address nodes (labels, tokens, pools)
-    - Clamp final risk score to [0.0, 1.0]
+    RULE:
+    - No structural OR flow anomaly → base_risk = 0
     """
 
     base_risks = {}
@@ -77,9 +99,7 @@ def compute_base_risk(
 
     for wallet, feats in node_features.items():
 
-        # -------------------------------------------------
-        # Skip non-wallet entities (labels, tokens, pools)
-        # -------------------------------------------------
+        # Skip non-wallet entities
         if not wallet.startswith("0x"):
             continue
 
@@ -87,36 +107,40 @@ def compute_base_risk(
 
         structural = compute_structural_risk(feats, patterns)
         flow = compute_flow_risk(feats, patterns)
-        temporal = compute_temporal_risk(feats, patterns)
-        proximity = compute_proximity_risk(G, suspicious_wallets, wallet)
 
-        raw_risk = (
-            weights[0] * structural +
-            weights[1] * flow +
-            weights[2] * temporal +
-            weights[3] * proximity
-        )
+        # 🚨 HARD GATE (this fixes your issue)
+        if structural == 0.0 and flow == 0.0:
+            base_risk = 0.0
+            temporal = 0.0
+            proximity = 0.0
+        else:
+            temporal = compute_temporal_risk(feats, patterns)
+            proximity = compute_proximity_risk(G, suspicious_wallets, wallet)
 
-        # -------------------------------------------------
-        # Clamp final risk to valid range
-        # -------------------------------------------------
-        base_risk = max(0.0, min(raw_risk, 1.0))
+            base_risk = (
+                weights[0] * structural +
+                weights[1] * flow +
+                weights[2] * temporal +
+                weights[3] * proximity
+            )
+
+        base_risk = round(min(base_risk, 1.0), 3)
 
         reasons = []
-        if structural > 0.7:
+        if structural:
             reasons.append("Suspicious transaction structure (fan-in / fan-out)")
-        if flow > 0.7:
+        if flow:
             reasons.append("Pass-through money flow behavior")
-        if temporal > 0.7:
+        if temporal:
             reasons.append("Highly coordinated transaction timing")
-        if proximity > 0.0:
+        if proximity > 0:
             reasons.append("Close proximity to suspicious wallets")
 
         base_risks[wallet] = {
-            "base_risk": round(base_risk, 3),
-            "structural_risk": round(structural, 3),
-            "flow_risk": round(flow, 3),
-            "temporal_risk": round(temporal, 3),
+            "base_risk": base_risk,
+            "structural_risk": structural,
+            "flow_risk": flow,
+            "temporal_risk": temporal,
             "proximity_risk": round(proximity, 3),
             "reasons": reasons,
         }

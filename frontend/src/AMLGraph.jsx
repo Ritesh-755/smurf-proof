@@ -13,9 +13,32 @@ export default function AMLGraph() {
       fetch(`${BASE_URL}/risk-scores/`).then(r => r.json())
     ])
       .then(([graph, finalRisk, riskScores]) => {
+
+        /* ============================
+           📊 CONSOLE LOGGING (DEBUG / JUDGES)
+        ============================ */
+        console.group("📊 API RESPONSE — /api/graph");
+        console.log("Timestamp:", new Date().toISOString());
+        console.log(graph);
+        console.groupEnd();
+
+        console.group("🎯 API RESPONSE — /api/final-risk");
+        console.log("Timestamp:", new Date().toISOString());
+        console.log(finalRisk);
+        console.groupEnd();
+
+        console.group("🔥 API RESPONSE — /api/risk-scores");
+        console.log("Timestamp:", new Date().toISOString());
+        console.log(riskScores);
+        console.groupEnd();
+
         renderGraph(graph, finalRisk, riskScores);
       })
-      .catch(err => console.error("❌ API error:", err));
+      .catch(err => {
+        console.group("❌ API ERROR");
+        console.error(err);
+        console.groupEnd();
+      });
   }, []);
 
   const renderGraph = (graph, finalRisk, riskScores) => {
@@ -24,19 +47,16 @@ export default function AMLGraph() {
     const width = window.innerWidth;
     const height = window.innerHeight;
 
+    /* ============================
+       RISK MAPS
+    ============================ */
     const riskMap = {};
-    const finalWallets = Array.isArray(finalRisk?.wallets) ? finalRisk.wallets : [];
-    finalWallets.forEach(w => {
+    (finalRisk?.wallets || []).forEach(w => {
       riskMap[w.id] = w;
     });
 
     const riskScoresMap = {};
-    const riskWallets = Array.isArray(riskScores?.wallets)
-      ? riskScores.wallets
-      : Array.isArray(riskScores)
-      ? riskScores
-      : [];
-    riskWallets.forEach(w => {
+    (riskScores?.wallets || []).forEach(w => {
       riskScoresMap[w.id] = w;
     });
 
@@ -79,34 +99,6 @@ export default function AMLGraph() {
       .attr("stdDeviation", "4")
       .attr("result", "coloredBlur");
 
-    defs.append("filter")
-      .attr("id", "smurfing-glow")
-      .append("feGaussianBlur")
-      .attr("stdDeviation", "3")
-      .attr("result", "coloredBlur");
-
-    defs.select("#smurfing-glow")
-      .append("feFlood")
-      .attr("flood-color", "#ef4444")
-      .attr("result", "coloredBlur");
-
-    defs.select("#smurfing-glow")
-      .append("feComposite")
-      .attr("in", "coloredBlur")
-      .attr("in2", "SourceGraphic")
-      .attr("operator", "in")
-      .attr("result", "colored");
-
-    defs.select("#smurfing-glow")
-      .append("feMerge")
-      .append("feMergeNode")
-      .attr("in", "colored");
-
-    defs.select("#smurfing-glow")
-      .select("feMerge")
-      .append("feMergeNode")
-      .attr("in", "SourceGraphic");
-
     /* ============================
        DEGREE → NODE SIZE
     ============================ */
@@ -144,7 +136,7 @@ export default function AMLGraph() {
       .style("opacity", 0);
 
     /* ============================
-       LINKS (Animated)
+       LINKS
     ============================ */
     const link = container.append("g")
       .selectAll("line")
@@ -163,12 +155,7 @@ export default function AMLGraph() {
       .attr("stroke-dasharray", d =>
         d.pattern === "peeling" ? "6 6" : "4 6"
       )
-      .attr("marker-end", d =>
-        d.pattern ? "url(#arrow)" : null
-      )
-      .attr("filter", d =>
-        d.pattern === "smurfing" ? "url(#smurfing-glow)" : null
-      );
+      .attr("marker-end", d => d.pattern ? "url(#arrow)" : null);
 
     /* Animated flow */
     let dash = 0;
@@ -187,31 +174,24 @@ export default function AMLGraph() {
       .append("circle")
       .attr("r", d => radius(degree[d.id] || 1))
       .attr("fill", d => {
-        const info = riskMap[d.id];
-        const r = info?.final_risk ?? 0;
+        const r = riskMap[d.id]?.final_risk ?? 0;
         if (r >= 0.85) return "#dc2626";
         if (r >= 0.6) return "#f97316";
         if (r >= 0.3) return "#22c55e";
         return "#2563eb";
       })
       .attr("filter", d =>
-        d.is_involved && riskMap[d.id]?.final_risk >= 0.85
-          ? "url(#glow)"
-          : null
+        riskMap[d.id]?.final_risk >= 0.85 ? "url(#glow)" : null
       )
       .on("mouseover", (e, d) => {
         const info = riskMap[d.id];
-        const rs = riskScoresMap[d.id];
-        const finalVal = info?.final_risk ?? d.risk ?? null;
-        const finalText = finalVal !== null ? (finalVal * 100).toFixed(1) + '%' : 'N/A';
-        const rsVal = rs?.base_risk ?? rs?.risk_score ?? rs?.score ?? null;
-        const rsText = rsVal !== null ? (rsVal * 100).toFixed(1) + '%' : 'N/A';
+        const base = riskScoresMap[d.id]?.base_risk;
         tooltip
           .style("opacity", 1)
           .html(`
             <strong>${d.id}</strong><br/>
-            Final Risk: ${finalText}<br/>
-            Risk Score: ${rsText}<br/>
+            Final Risk: ${(info?.final_risk * 100).toFixed(1)}%<br/>
+            Base Risk: ${(base * 100).toFixed(1)}%<br/>
             ${info?.reasons?.map(r => `• ${r}`).join("<br/>") || ""}
           `);
       })
@@ -220,40 +200,13 @@ export default function AMLGraph() {
           .style("left", e.pageX + 12 + "px")
           .style("top", e.pageY + 12 + "px");
       })
-      .on("mouseout", () => {
-        tooltip.style("opacity", 0);
-      })
+      .on("mouseout", () => tooltip.style("opacity", 0))
       .call(
         d3.drag()
-          .on("start", e => {
-            if (!e.active) sim.alphaTarget(0.3).restart();
-          })
-          .on("drag", (e, d) => {
-            d.fx = e.x;
-            d.fy = e.y;
-          })
-          .on("end", e => {
-            if (!e.active) sim.alphaTarget(0);
-          })
+          .on("start", e => !e.active && sim.alphaTarget(0.3).restart())
+          .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
+          .on("end", e => !e.active && sim.alphaTarget(0))
       );
-
-    /* ============================
-       RISK LABELS (percentage next to node)
-    ============================ */
-    const labels = container.append("g")
-      .selectAll("text")
-      .data(graph.nodes)
-      .enter()
-      .append("text")
-      .attr("font-size", 11)
-      .attr("fill", "#e5e7eb")
-      .attr("pointer-events", "none")
-      .attr("dy", ".35em")
-      .text(d => {
-        const rs = riskScoresMap[d.id];
-        const v = rs?.base_risk ?? d.risk ?? null;
-        return v !== null ? (v * 100).toFixed(0) + '%' : '';
-      });
 
     /* ============================
        SIM TICK
@@ -268,45 +221,7 @@ export default function AMLGraph() {
       node
         .attr("cx", d => d.x)
         .attr("cy", d => d.y);
-
-      labels
-        .attr("x", d => d.x + (radius(degree[d.id] || 1) + 8))
-        .attr("y", d => d.y);
     });
-
-    /* ============================
-       LEGEND
-    ============================ */
-    const legend = svg.append("g")
-      .attr("transform", "translate(20,20)");
-
-    const legendData = [
-      { label: "High Risk Wallet", color: "#DC143C" },
-      { label: "Medium Risk Wallet", color: "#f97316" },
-      { label: "Low Risk Wallet", color: "#22c55e" },
-      { label: "Normal Wallet", color: "#2563eb" },
-      { label: "Smurfing Path", color: "#ef4444" },
-      { label: "Peeling Chain", color: "#a855f7" }
-    ];
-
-    legend.selectAll("g")
-      .data(legendData)
-      .enter()
-      .append("g")
-      .attr("transform", (_, i) => `translate(0, ${i * 22})`)
-      .each(function (d) {
-        const g = d3.select(this);
-        g.append("rect")
-          .attr("width", 14)
-          .attr("height", 14)
-          .attr("fill", d.color);
-        g.append("text")
-          .attr("x", 20)
-          .attr("y", 12)
-          .attr("font-size", "12px")
-          .attr("fill", "#e5e7eb")
-          .text(d.label);
-      });
   };
 
   return <svg ref={svgRef} className="fixed inset-0 w-full h-full" />;
